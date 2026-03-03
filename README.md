@@ -104,9 +104,9 @@ python gsm8k_grpo.py \
 17 experiments sweeping 6 hyperparameter groups, each for 50 steps. Run all:
 
 ```bash
-python ablation_study.py                    # runs all 17, then generates report
-python ablation_study.py --only baseline lr_2e-5   # run specific experiments
-python ablation_study.py --dry_run         # print commands without running
+python ablation/ablation_study.py                          # runs all 17, then generates report
+python ablation/ablation_study.py --only baseline lr_2e-5  # run specific experiments
+python ablation/ablation_study.py --dry_run                # print commands without running
 ```
 
 Results land in `runs/ablation/`. The pre-run results from our study are already there — see [`runs/ablation/report/`](runs/ablation/report/) for the figures and [`summary.md`](summary.md) for the analysis.
@@ -114,7 +114,7 @@ Results land in `runs/ablation/`. The pre-run results from our study are already
 To regenerate the report from existing data:
 
 ```bash
-python ablation_report.py --results_dir runs/ablation
+python ablation/ablation_report.py --results_dir runs/ablation
 ```
 
 ---
@@ -134,9 +134,9 @@ The 0.1 format bonus ensures the model is rewarded for learning the output forma
 ## Files
 
 ```
-gsm8k_grpo.py        Training loop (load data → rollout → GRPO → save)
-ablation_study.py    Runs N experiments sequentially, skips completed ones
-ablation_report.py   Reads run JSONs, generates 5 figures + report.md
-summary.md           Ablation findings and recommendations
-runs/ablation/       Pre-run experiment data (metrics + logs + figures)
+gsm8k_grpo.py                  Training loop (load data → rollout → GRPO → save)
+ablation/ablation_study.py     Runs N experiments sequentially, skips completed ones
+ablation/ablation_report.py    Reads run JSONs, generates 5 figures + report.md
+summary.md                     Ablation findings and recommendations
+runs/ablation/                 Pre-run experiment data (metrics + logs + figures)
 ```

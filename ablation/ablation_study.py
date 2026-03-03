@@ -184,7 +184,7 @@ def main():
 
     if not args.skip_report:
         report_cmd = [
-            sys.executable, "ablation_report.py",
+            sys.executable, "ablation/ablation_report.py",
             "--results_dir", str(base_dir),
         ]
         print(f"\n[ablation] Generating report...")
