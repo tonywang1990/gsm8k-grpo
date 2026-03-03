@@ -1,0 +1,32 @@
+[
+  {
+    "accuracy": 0.2,
+    "format_rate": 0.24,
+    "n_problems": 100,
+    "step": 10
+  },
+  {
+    "accuracy": 0.3,
+    "format_rate": 0.34,
+    "n_problems": 100,
+    "step": 20
+  },
+  {
+    "accuracy": 0.43,
+    "format_rate": 0.55,
+    "n_problems": 100,
+    "step": 30
+  },
+  {
+    "accuracy": 0.61,
+    "format_rate": 0.7,
+    "n_problems": 100,
+    "step": 40
+  },
+  {
+    "accuracy": 0.72,
+    "format_rate": 0.91,
+    "n_problems": 100,
+    "step": 50
+  }
+]

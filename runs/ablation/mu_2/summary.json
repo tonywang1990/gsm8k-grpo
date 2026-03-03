@@ -1,0 +1,15 @@
+{
+  "total_steps": 50,
+  "early_stopped": false,
+  "final_accuracy": 0.8906,
+  "best_accuracy": 1.0,
+  "best_step": 39,
+  "final_reward": 0.9003,
+  "final_loss": 0.00047,
+  "final_clip_frac": 0.0051,
+  "final_grad_norm": 0.3788,
+  "checkpoint_path": "runs/gsm8k/ablation/mu_2/final_model",
+  "best_eval_accuracy": 0.84,
+  "best_eval_step": 40,
+  "final_eval_accuracy": 0.78
+}
