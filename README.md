@@ -9,6 +9,23 @@ See [`summary.md`](summary.md) for full ablation findings and the recommended co
 
 ---
 
+## What problem this solves
+
+Most open-source GRPO implementations delegate the hard parts to TRL's `GRPOTrainer`, which hides the training loop behind a callback-heavy abstraction. This makes it difficult to understand what's actually happening, experiment with the algorithm, or adapt it to a new setting. This repo strips all of that away.
+
+Three specific problems that are rarely addressed cleanly elsewhere:
+
+**1. Running vLLM and a trainable HF model in the same process.**
+The standard approach is either vLLM-only (fast inference, not trainable) or HF-only (trainable, slow generation). The hard part is keeping both alive simultaneously without OOMing — vLLM pre-allocates GPU memory aggressively. This repo uses Unsloth's `unsloth_vllm_standby` mode, which holds vLLM in a suspended state during the backward pass and wakes it only for rollouts. After each optimizer step, updated LoRA weights are saved to disk and hot-reloaded into the vLLM engine, so rollouts always use the latest policy with no model duplication in memory.
+
+**2. Correctly masking the loss to assistant tokens only.**
+Most tutorials compute the loss over the full sequence including the prompt, or use a naive `[prompt_len:]` slice that accidentally includes role header tokens (`<|im_start|>assistant\n`). This repo builds an exact per-token binary mask by walking the token IDs and tracking `<|im_start|>` / `<|im_end|>` boundaries, so the loss only touches the actual generated content.
+
+**3. Avoiding full-vocabulary logit materialization.**
+At each training step, computing log-probabilities naively requires materializing a `(batch, seq_len, vocab_size)` tensor — for a 32K vocab and long sequences this alone can OOM. This repo passes `logits_to_keep=num_completion_tokens` to the forward pass so the model only produces logits for the completion suffix, then applies a fused gather+logsumexp to extract per-token log-probs without ever holding the full logit tensor.
+
+---
+
 ## How it works
 
 ```
