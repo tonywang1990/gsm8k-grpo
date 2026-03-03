@@ -1,0 +1,18 @@
+[project]
+name = "gsm8k-grpo"
+version = "0.1.0"
+description = "Standalone GRPO trainer for GSM8K math reasoning"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4.0",
+    "transformers>=4.46.0",
+    "datasets>=4.3.0",
+    "vllm>=0.15.1",
+    "unsloth>=2026.2.1",
+    "coolname>=3.0.0",
+    "matplotlib>=3.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
