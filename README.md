@@ -5,7 +5,7 @@ Standalone GRPO trainer for GSM8K math reasoning. No TRL, no HF Trainer — one 
 **Baseline result**: Qwen3-1.7B, 50 steps → **74.0% eval accuracy**
 **Best ablation**: `num_groups=16` → **82.0%** (+8 points, same compute budget)
 
-See [`summary.md`](summary.md) for full ablation findings and the recommended config.
+See [`ablation/README.md`](ablation/README.md) for full ablation findings and the recommended config.
 
 ---
 
@@ -126,7 +126,7 @@ python ablation/ablation_study.py --only baseline lr_2e-5  # run specific experi
 python ablation/ablation_study.py --dry_run                # print commands without running
 ```
 
-Results land in `runs/ablation/`. The pre-run results from our study are already there — see [`runs/ablation/report/`](runs/ablation/report/) for the figures and [`summary.md`](summary.md) for the analysis.
+Results land in `runs/ablation/`. The pre-run results from our study are already there — see [`runs/ablation/report/`](runs/ablation/report/) for the figures and [`ablation/README.md`](ablation/README.md) for the analysis.
 
 To regenerate the report from existing data:
 
@@ -154,6 +154,6 @@ The 0.1 format bonus ensures the model is rewarded for learning the output forma
 gsm8k_grpo.py                  Training loop (load data → rollout → GRPO → save)
 ablation/ablation_study.py     Runs N experiments sequentially, skips completed ones
 ablation/ablation_report.py    Reads run JSONs, generates 5 figures + report.md
-summary.md                     Ablation findings and recommendations
+ablation/README.md             Ablation findings and recommendations
 runs/ablation/                 Pre-run experiment data (metrics + logs + figures)
 ```
