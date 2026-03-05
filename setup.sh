@@ -1,5 +1,10 @@
 #!/bin/bash
-# Activate the venv (create it first if needed: uv venv && uv pip install -e .)
+
+# Set up git
+git config --global user.email "tonybestrong@gmail.com"
+git config --global user.name "Tony Wang"
+
+# setup venv
 source .venv/bin/activate
 
 # Install CUDA compat only if the driver's CUDA version is older than 12.9
@@ -16,3 +21,16 @@ if [ "$(printf '%s\n' "$REQUIRED_CUDA" "$DRIVER_CUDA" | sort -V | head -n1)" != 
 else
     echo "Driver CUDA $DRIVER_CUDA >= $REQUIRED_CUDA, compat libs not needed."
 fi
+
+# Install and setup Claude Code -- run at end of script
+
+echo "Installing Claude Code..."
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Add to PATH in .bashrc if not already present
+if ! grep -q '\.local/bin' ~/.bashrc; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+fi
+
+# Export PATH for current script session
+export PATH="$HOME/.local/bin:$PATH"
