@@ -37,14 +37,8 @@ import sys
 import time
 
 # Load .env if present
-_env_path = os.path.join(os.path.dirname(__file__), ".env")
-if os.path.exists(_env_path):
-    with open(_env_path) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _, _v = _line.partition("=")
-                os.environ.setdefault(_k.strip(), _v.strip())
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Prevent Cursor's debugger (pydevd) from attaching to vLLM subprocesses.
 # The bundled debugger is incompatible with Python 3.12+ (missing `imp` module).
@@ -76,6 +70,10 @@ FINAL_ANSWER_PATTERN = re.compile(r"<final_answer>(.*?)</final_answer>", re.DOTA
 # This bootstraps learning when correctness rewards are sparse.
 FORMAT_REWARD = 0.1
 
+# Penalty applied when the model ends a turn with neither a tool call nor a <final_answer>
+# (naked reasoning). Distinct from simply running out of turns.
+NAKED_REASONING_PENALTY = -0.05
+
 
 # ============================================================================
 # Data structures
@@ -85,7 +83,7 @@ FORMAT_REWARD = 0.1
 class SolutionData:
     prompt_ids: list[int]
     completion_ids: list[int]
-    assistant_mask: list[int]
+    assistant_mask: list[float]
     reward: float
     info: dict  # question, ground_truth, final_answer, is_correct, turns, tool_calls
 
@@ -99,6 +97,7 @@ class TrajectoryState:
     final_answer: str | None = None
     turns: int = 0
     tool_call_count: int = 0
+    naked_reasoning: bool = False  # True when last turn had no tool call and no <final_answer>
 
 
 # ============================================================================
@@ -126,13 +125,16 @@ SYSTEM_PROMPT_TEMPLATE = (
     "User's email address is {inbox_address}\n"
     "Today's date is {query_date}\n\n"
     "Before each action, briefly explain your reasoning, then either call a tool or "
-    "provide your final answer inside <final_answer></final_answer> tags."
+    "provide your final answer inside <final_answer></final_answer> tags.\n\n"
+    "Two examples follow showing the expected behavior, including how to retry with "
+    "different keywords when a search returns no results. After the examples, your actual task begins."
 )
 
 FEW_SHOT_MESSAGES = [
+    # ── Example 1: straightforward search ────────────────────────────────────
     {
         "role": "user",
-        "content": "When is the next all-hands meeting?",
+        "content": "[Example 1] When is the next all-hands meeting?",
     },
     {
         "role": "assistant",
@@ -175,6 +177,50 @@ FEW_SHOT_MESSAGES = [
         "content": (
             "The email confirms the all-hands meeting is on Friday March 9th at 10am. "
             "<final_answer>Friday March 9th at 10am</final_answer>"
+        ),
+    },
+    # ── Example 2: retry with different keywords after no results ─────────────
+    {
+        "role": "user",
+        "content": "[Example 2] What is the budget for the holiday party?",
+    },
+    {
+        "role": "assistant",
+        "content": (
+            "I'll search for emails mentioning the holiday party budget.\n"
+            '<tool_call>\n{"name": "search_inbox", "arguments": {"keywords": ["holiday", "party", "budget"]}}\n</tool_call>'
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "<tool_response>\n"
+            "No emails found matching your search.\n"
+            "</tool_response>"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            "No results. The email might not use all three words together. "
+            "I'll drop \"holiday\" and try broader keywords.\n"
+            '<tool_call>\n{"name": "search_inbox", "arguments": {"keywords": ["party", "budget"]}}\n</tool_call>'
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "<tool_response>\n"
+            "Found 1 email(s):\n"
+            "- message_id=<DEF.5678@enron.com> | snippet=...approved a <b>budget</b> of $2,500 for the holiday <b>party</b> in December...\n"
+            "</tool_response>"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            "The snippet clearly states the budget. "
+            "<final_answer>$2,500</final_answer>"
         ),
     },
 ]
@@ -353,12 +399,20 @@ def _compute_reward_word_overlap(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+_GRADE_TO_SCORE = {"4": 1.0, "3": 0.75, "2": 0.5, "1": 0.25, "0": 0.0}
+
 async def _llm_judge_single(client, prediction: str, reference: str, question: str, model: str) -> float:
     prompt = (
         f"Question: {question}\n\n"
         f"Reference answer: {reference}\n\n"
         f"Model answer: {prediction}\n\n"
-        "Is the model answer correct? Reply with exactly 'yes' or 'no'."
+        "Score the model answer on a scale of 0 to 4:\n"
+        "4 = exact or fully correct\n"
+        "3 = mostly correct, minor omission or phrasing difference\n"
+        "2 = partially correct, captures key fact but incomplete\n"
+        "1 = related but wrong or very incomplete\n"
+        "0 = completely wrong or irrelevant\n\n"
+        "Reply with a single digit (0, 1, 2, 3, or 4)."
     )
     try:
         response = await client.chat.completions.create(
@@ -367,8 +421,8 @@ async def _llm_judge_single(client, prediction: str, reference: str, question: s
             max_tokens=5,
             temperature=0.0,
         )
-        verdict = response.choices[0].message.content.strip().lower()
-        return 1.0 if verdict.startswith("yes") else 0.0
+        digit = response.choices[0].message.content.strip()
+        return _GRADE_TO_SCORE.get(digit, 0.0)
     except Exception as e:
         print(f"  [LLM judge error] {e}")
         return 0.0
@@ -383,7 +437,7 @@ def _compute_rewards(
     if reward_model == "none":
         for traj in trajectories:
             if traj.final_answer is None:
-                rewards.append(0.0)
+                rewards.append(NAKED_REASONING_PENALTY if traj.naked_reasoning else 0.0)
             else:
                 correctness = _compute_reward_word_overlap(traj.final_answer, traj.scenario["answer"])
                 rewards.append(min(FORMAT_REWARD + correctness, 1.0))
@@ -412,7 +466,7 @@ def _compute_rewards(
 
         for traj, raw_reward in zip(trajectories, raw_rewards):
             if traj.final_answer is None:
-                reward = 0.0
+                reward = NAKED_REASONING_PENALTY if traj.naked_reasoning else 0.0
             else:
                 reward = min(FORMAT_REWARD + raw_reward, 1.0)
             rewards.append(reward)
@@ -435,6 +489,7 @@ class RolloutConfig:
     openai_client: object = None
     max_turns: int = 8
     max_tokens_per_turn: int = 512
+    max_seq_length: int = 8192
 
 
 # ============================================================================
@@ -456,7 +511,18 @@ def _run_turn_loop(
         if not active_idxs:
             break
 
-        prompts = [_prompt_str(config.tokenizer, trajectories[i].messages) for i in active_idxs]
+        # Tokenize and truncate prompts that exceed the context window.
+        # vLLM accepts {"prompt_token_ids": [...]} dicts as well as plain strings.
+        max_prompt_tokens = config.max_seq_length - config.max_tokens_per_turn
+        prompts = []
+        for i in active_idxs:
+            ids = config.tokenizer.encode(
+                _prompt_str(config.tokenizer, trajectories[i].messages),
+                add_special_tokens=False,
+            )
+            if len(ids) > max_prompt_tokens:
+                ids = ids[-max_prompt_tokens:]  # keep the most recent context
+            prompts.append({"prompt_token_ids": ids})
         outputs = vllm_engine.generate(prompts, sampling_params=sampling_params, use_tqdm=False, **gen_kwargs)
 
         for traj_i, output in zip(active_idxs, outputs):
@@ -485,6 +551,7 @@ def _run_turn_loop(
             else:
                 # No tool call and no <final_answer> tag — treat as done but with no answer
                 traj.final_answer = None
+                traj.naked_reasoning = True
                 traj.messages.append({"role": "assistant", "content": text})
                 traj.done = True
 
@@ -530,8 +597,9 @@ def rollout(
         assistant_mask = build_assistant_mask(
             full_ids, len(prompt_ids),
             config.im_start_id, config.im_end_id, config.assistant_role_id,
+            tokenizer=config.tokenizer,
         )
-        is_correct = reward >= 0.5 if config.reward_model == "none" else reward == 1.0
+        is_correct = reward >= 0.5
         solutions.append(SolutionData(
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
@@ -573,9 +641,8 @@ def evaluate(
     rewards = _compute_rewards(trajectories, config.reward_model, config.openai_client)
 
     n = len(scenarios)
-    is_llm = config.reward_model != "none"
     return {
-        "accuracy": sum(1 for r in rewards if (r == 1.0 if is_llm else r >= 0.5)) / n,
+        "accuracy": sum(1 for r in rewards if r >= 0.5) / n,
         "final_answer_rate": sum(1 for t in trajectories if t.final_answer is not None) / n,
         "tool_call_rate": sum(1 for t in trajectories if t.tool_call_count > 0) / n,
         "turn_mean": round(sum(t.turns for t in trajectories) / max(n, 1), 2),
@@ -651,23 +718,35 @@ def setup_model(model_name: str, max_seq_length: int, lora_rank: int, resume_fro
 # Multi-turn rollout infrastructure (GRPO-specific, module-level)
 # ============================================================================
 
+_ACTION_TAG_RE = re.compile(
+    r"<tool_call>.*?</tool_call>|<final_answer>.*?</final_answer>", re.DOTALL
+)
+
+
 def build_assistant_mask(
     token_ids: list[int], prompt_length: int,
     im_start_id: int, im_end_id: int, assistant_role_id: int,
-) -> list[int]:
-    """Build mask: 1 for assistant content tokens in the completion, 0 elsewhere.
+    tokenizer=None,
+    action_weight: float = 1.0,
+    reasoning_weight: float = 0.2,
+) -> list[float]:
+    """Build a weighted mask over the completion tokens.
 
-    Handles multi-turn conversations by scanning all assistant turns.
+    Action tokens (inside <tool_call> or <final_answer> tags) get action_weight.
+    Reasoning prose tokens get reasoning_weight.
+    Non-assistant tokens (tool responses, user turns) get 0.0.
     """
     completion_len = len(token_ids) - prompt_length
-    mask = [0] * completion_len
+    completion_ids = token_ids[prompt_length:]
+
+    # Step 1: build is_assistant map (same logic as before)
+    is_assistant = [False] * completion_len
     in_assistant = False
     skip_role_tokens = 0
 
     for i in range(prompt_length, len(token_ids)):
         idx = i - prompt_length
         tok = token_ids[i]
-
         if tok == im_end_id:
             in_assistant = False
             continue
@@ -682,7 +761,34 @@ def build_assistant_mask(
             if skip_role_tokens > 0:
                 skip_role_tokens -= 1
                 continue
-            mask[idx] = 1
+            is_assistant[idx] = True
+
+    if tokenizer is None:
+        return [1.0 if a else 0.0 for a in is_assistant]
+
+    # Step 2: decode completion and find action tag char spans via regex.
+    # Token-level matching is unreliable because <final_answer> is not a Qwen3
+    # special token — BPE merges the preceding space with "<", so the token
+    # sequence differs from tokenizer.encode("<final_answer>") in isolation.
+    completion_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+    action_spans = [(m.start(), m.end()) for m in _ACTION_TAG_RE.finditer(completion_text)]
+
+    if not action_spans:
+        return [reasoning_weight if a else 0.0 for a in is_assistant]
+
+    # Step 3: re-encode with offset_mapping to get char→token correspondence.
+    # The encode→decode→encode round-trip is lossless for tiktoken, so offsets
+    # align 1-to-1 with completion_ids.
+    offsets = tokenizer(
+        completion_text, return_offsets_mapping=True, add_special_tokens=False
+    )["offset_mapping"]
+
+    mask = [0.0] * completion_len
+    for tok_i, (char_start, char_end) in enumerate(offsets):
+        if tok_i >= completion_len or not is_assistant[tok_i]:
+            continue
+        in_action = any(a_s <= char_start and char_end <= a_e for a_s, a_e in action_spans)
+        mask[tok_i] = action_weight if in_action else reasoning_weight
 
     return mask
 
@@ -867,27 +973,30 @@ def log_trajectories(log_path, step, solutions, group_size, tokenizer, step_stat
             )
             lines.append("")
 
-            # Completion only: split into runs by mask value, wrap trained spans in <<<...>>>
+            # Completion only: split into runs by mask weight, annotate each span type.
+            # 0.0 = untrained  |  0 < w < 1.0 = ==REASON==  |  w == 1.0 = ==ACTION==
             if sol.completion_ids:
                 run_ids: list[int] = []
                 run_mask = sol.assistant_mask[0]
-                chunks: list[tuple[bool, list[int]]] = []
+                chunks: list[tuple[float, list[int]]] = []
                 for tok, m in zip(sol.completion_ids, sol.assistant_mask):
                     if m == run_mask:
                         run_ids.append(tok)
                     else:
-                        chunks.append((bool(run_mask), run_ids))
+                        chunks.append((run_mask, run_ids))
                         run_ids = [tok]
                         run_mask = m
-                chunks.append((bool(run_mask), run_ids))
+                chunks.append((run_mask, run_ids))
 
                 parts = []
-                for trained, ids in chunks:
+                for weight, ids in chunks:
                     text = tokenizer.decode(ids, skip_special_tokens=False)
-                    if trained:
-                        parts.append(f"==TRAIN_START=={text}==TRAIN_END==")
-                    else:
+                    if weight == 0.0:
                         parts.append(text)
+                    elif weight < 1.0:
+                        parts.append(f"==REASON_START=={text}==REASON_END==")
+                    else:
+                        parts.append(f"==ACTION_START=={text}==ACTION_END==")
                 lines.append("".join(parts))
             else:
                 lines.append("(empty completion)")
@@ -1030,6 +1139,7 @@ def main():
         openai_client=openai_client,
         max_turns=args.max_turns,
         max_tokens_per_turn=args.max_tokens_per_turn,
+        max_seq_length=args.max_seq_length,
     )
 
     # ── 5. Training loop ──────────────────────────────────────────────────
@@ -1083,7 +1193,7 @@ def main():
         old_logps_list = []
         with torch.no_grad():
             for sol in solutions:
-                ids = sol.prompt_ids + sol.completion_ids
+                ids = (sol.prompt_ids + sol.completion_ids)[-args.max_seq_length:]
                 input_ids = torch.tensor([ids], device=device)
                 attn_mask = torch.ones_like(input_ids)
                 num_completion = len(sol.completion_ids)
@@ -1113,7 +1223,7 @@ def main():
                 if sum(sol.assistant_mask) == 0:
                     continue
 
-                ids = sol.prompt_ids + sol.completion_ids
+                ids = (sol.prompt_ids + sol.completion_ids)[-args.max_seq_length:]
                 input_ids = torch.tensor([ids], device=device)
                 attn_mask = torch.ones_like(input_ids)
                 num_completion = len(sol.completion_ids)
